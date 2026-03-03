@@ -8,27 +8,73 @@ jobs:
   build:
     runs-on: ubuntu-latest
 
+    # FIX 1: Buildozer in CI runs as root — this env var silences the
+    # root-user warning that otherwise causes a non-zero exit (return 1)
+    env:
+      BUILDOZER_WARN_ON_ROOT: 0
+
     steps:
       - uses: actions/checkout@v3
 
+      # FIX 2: Python 3.11 has known compatibility issues with python-for-android
+      # recipes. Use 3.10 — it is the most battle-tested version for Kivy + p4a.
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
-          python-version: '3.11'
+          python-version: '3.10'
 
-      - name: Install dependencies
+      # FIX 3: Several required system packages were missing:
+      #   - cmake          → needed by p4a native recipes
+      #   - libltdl-dev    → required by libtool during NDK compilation
+      #   - libpulse-dev   → needed by Kivy audio backend
+      #   - build-essential→ provides gcc/g++ for C extension compilation
+      - name: Install system dependencies
         run: |
           sudo apt update
-          sudo apt install -y python3-pip git zip unzip openjdk-17-jdk \
-          python3-dev autoconf automake libtool pkg-config zlib1g-dev \
-          libncurses5-dev libffi-dev libssl-dev
+          sudo apt install -y \
+            python3-pip git zip unzip \
+            openjdk-17-jdk \
+            python3-dev \
+            build-essential \
+            autoconf automake libtool libltdl-dev \
+            pkg-config cmake \
+            zlib1g-dev libncurses5-dev \
+            libffi-dev libssl-dev \
+            libpulse-dev
+
+      # FIX 4: cython and virtualenv were completely missing from pip installs.
+      #   - cython      → p4a REQUIRES this to compile Kivy's C extensions
+      #   - virtualenv  → p4a creates isolated build envs internally
+      # Without cython the build exits immediately with return 1.
+      - name: Install Python build tools
+        run: |
           pip install --upgrade pip
-          pip install buildozer
+          pip install buildozer cython virtualenv
+
+      # FIX 5: Cache the heavy .buildozer directory between runs.
+      # The Android SDK/NDK download is ~2 GB — without this, every run
+      # re-downloads everything and is likely to hit the 6-hour CI timeout.
+      - name: Cache buildozer global directory
+        uses: actions/cache@v3
+        with:
+          path: ~/.buildozer
+          key: buildozer-${{ runner.os }}-${{ hashFiles('buildozer.spec') }}
+          restore-keys: |
+            buildozer-${{ runner.os }}-
+
+      # FIX 6: Accept Android SDK licenses before the build starts.
+      # Without this step the SDK installer hangs waiting for interactive input
+      # and eventually times out or exits 1.
+      - name: Accept Android SDK licenses
+        run: |
+          mkdir -p ~/.android
+          touch ~/.android/repositories.cfg
+          yes | buildozer android debug 2>&1 | head -5 || true
 
       - name: Build APK
         run: |
           buildozer -v android debug
-          
+
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
